@@ -1,4 +1,5 @@
 from utils.place_info_search import TavilyPlaceSearchTool
+from utils.prompt_injection_guard import validate_place_query
 from typing import List
 from langchain.tools import tool
 from dotenv import load_dotenv
@@ -15,6 +16,7 @@ class PlaceSearchTool:
         @tool
         def search_attractions(place:str) -> str:
             """Search attractions of a place"""
+            place = validate_place_query(place)
             if self.tracer:
                 self.tracer.log("tool_start", "Running search_attractions", tool="search_attractions", place=place)
             attraction_result = self.tavily_search.tavily_search_attractions(place)
@@ -25,6 +27,7 @@ class PlaceSearchTool:
         @tool
         def search_restaurants(place:str) -> str:
             """Search restaurants of a place"""
+            place = validate_place_query(place)
             if self.tracer:
                 self.tracer.log("tool_start", "Running search_restaurants", tool="search_restaurants", place=place)
             restaurants_result = self.tavily_search.tavily_search_restaurants(place)
@@ -35,6 +38,7 @@ class PlaceSearchTool:
         @tool
         def search_activities(place:str) -> str:
             """Search activities of a place"""
+            place = validate_place_query(place)
             if self.tracer:
                 self.tracer.log("tool_start", "Running search_activities", tool="search_activities", place=place)
             activities_result = self.tavily_search.tavily_search_activity(place)
@@ -45,6 +49,7 @@ class PlaceSearchTool:
         @tool
         def search_transportation(place:str) -> str:
             """Search transportation of a place"""
+            place = validate_place_query(place)
             if self.tracer:
                 self.tracer.log("tool_start", "Running search_transportation", tool="search_transportation", place=place)
             transportation_result = self.tavily_search.tavily_search_transportation(place)

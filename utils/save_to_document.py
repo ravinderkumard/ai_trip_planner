@@ -1,5 +1,8 @@
-import os
 import datetime
+import logging
+import os
+
+logger = logging.getLogger(__name__)
 
 def save_document(response_text: str, directory: str = "./output"):
     """Export travel plan to Markdown file with proper formatting"""
@@ -27,14 +30,12 @@ def save_document(response_text: str, directory: str = "./output"):
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         filename = f"{directory}/AI_Trip_Planner_{timestamp}.md"
 
-        print(filename)
-
         with open(filename, 'w', encoding='utf-8') as f:
             f.write(markdown_content)
         
-        print(f"Markdown file saved as: {filename}")
+        logger.info("Travel plan saved to %s", filename)
         return filename
         
-    except Exception as e:
-        print(f"Error saving markdown file: {e}")
+    except Exception:
+        logger.exception("Failed to save travel plan document")
         return None
