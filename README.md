@@ -12,6 +12,19 @@ The repository is structured as a small end-to-end application rather than a lib
 - Saves generated itineraries as Markdown files under `output/`
 - Generates a workflow diagram image as part of execution
 
+## Security measures currently implemented
+
+- Request validation for incoming travel queries
+- Restricted CORS defaults with environment-based origin overrides
+- In-memory rate limiting for both API endpoints
+- Safer error handling that avoids returning raw internal exceptions to clients
+- Timeout-based protection for outbound weather and currency API calls
+- Targeted application logging for request flow and external service failures
+- Prompt-injection screening for suspicious input patterns at the API boundary
+- Validation of place-search tool arguments before Tavily calls are made
+- Sanitization of Tavily search results before they are passed back to the model
+- A hardened system prompt that tells the model to treat retrieved content as untrusted
+
 ## Repository structure
 
 - [`main.py`](/Users/ravinderkumar/Work/upskill/AI/AIAgent/ai_trip_planner/main.py): FastAPI application and API endpoints
@@ -67,6 +80,9 @@ GROQ_MODEL_NAME=your_model_here
 OPENWEATHERMAP_API_KEY=your_key_here
 EXCHANGE_RATE_API_KEY=your_key_here
 TAVILY_API_KEY=your_key_here
+CORS_ALLOWED_ORIGINS=http://localhost:8501,http://127.0.0.1:8501
+RATE_LIMIT_MAX_REQUESTS=10
+RATE_LIMIT_WINDOW_SECONDS=60
 ```
 
 ## Running the application

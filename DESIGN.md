@@ -74,6 +74,8 @@ The API layer is responsible for:
 
 - Input validation through `QueryRequest`
 - CORS setup
+- Request rate limiting
+- Prompt-injection screening for suspicious input patterns
 - Running the orchestration entry point
 - Returning either a final payload or a streamed event sequence
 - Handling top-level exceptions
@@ -113,6 +115,8 @@ The main tool groups are:
 - Currency conversion tools
 
 Each group is initialized inside `GraphBuilder` and contributes one or more callable tools to the bound model.
+
+The current implementation also places lightweight validation and sanitization in front of tool-backed search so untrusted retrieved content is less likely to influence model behavior as instructions.
 
 #### 5.4 Frontend Layer
 
@@ -207,6 +211,8 @@ This module defines a single system prompt that frames the assistant as:
 
 The prompt strongly shapes response structure. It asks for two itinerary variants, practical recommendations, cost details, and weather context.
 
+The prompt also now includes explicit security rules telling the model to treat user input, tool output, and retrieved search content as untrusted data rather than higher-priority instructions.
+
 #### 7.4 `utils/model_loader.py`
 
 This module abstracts model selection and config loading.
@@ -246,6 +252,8 @@ The `utils/` directory contains helper classes that perform direct work:
 - Capturing execution trace events
 
 These classes are plain and easy to test in isolation.
+
+Security-related helpers also live in `utils/`, including the in-memory rate limiter and prompt-injection guard utilities used by the API and search tools.
 
 ### 8. Agent Workflow Design
 
@@ -300,6 +308,11 @@ Four tools are exposed:
 - `search_transportation(place)`
 
 Each tool performs a focused Tavily search and returns the answer field when available. This keeps prompt context compact while still letting the agent retrieve web-backed information.
+
+The current implementation adds two safeguards here:
+
+- Place arguments are validated before search is executed
+- Tavily results are sanitized and returned with an explicit reminder that they are untrusted reference data only
 
 #### 9.3 Expense Calculation
 
@@ -364,6 +377,8 @@ It stores events locally and can optionally publish them to a queue. This makes 
 
 The tracer is deliberately lightweight. It is not a full observability framework, but it gives enough visibility to understand graph progress, model invocation, and tool execution during interactive use.
 
+The broader logging approach in the current codebase is intentionally selective. It logs request lifecycle events, model/provider initialization, output persistence, rate-limit rejections, and external-service failures, while avoiding full user prompt logging and avoiding secret values.
+
 ### 12. Configuration and Environment
 
 The application relies on both YAML configuration and environment variables.
@@ -422,6 +437,15 @@ This keeps the code simple but creates uneven failure behavior across tools. For
 
 From a design standpoint, this means the current system is functional for development, but not yet hardened for production-grade resilience.
 
+That said, the implementation now includes a first security-focused hardening pass:
+
+- Generic client-safe error messages at the API layer
+- Logging of server-side exceptions without returning internals to the caller
+- Timeouts on outbound weather and currency API calls
+- Rate limiting for `/query` and `/query/stream`
+- Prompt-injection pattern checks for inbound requests
+- Input validation for place-search tool arguments
+
 ### 15. Current Limitations
 
 The current implementation is usable, but a few constraints are visible in the code:
@@ -442,10 +466,20 @@ These are not design failures so much as reasonable tradeoffs for an early imple
 
 The application is designed for trusted local or controlled use. A few operational details matter:
 
-- CORS is currently open to all origins
+- CORS is restricted to configured origins
 - Secrets are expected through environment variables
 - Output files are written directly to the local filesystem
 - There is no authentication on the API layer
+
+The current implementation includes the following defensive controls:
+
+- Request validation with bounded question length
+- In-memory per-client rate limiting
+- Environment-configurable CORS allowlist
+- Timeout-based handling for outbound HTTP calls
+- Prompt-injection screening at the API boundary
+- Sanitization of Tavily search content before it re-enters model context
+- Targeted warning and exception logging for abuse or upstream failures
 
 This is acceptable for development and demo usage, but it would need tightening before public deployment.
 
