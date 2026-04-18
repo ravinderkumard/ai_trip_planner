@@ -7,15 +7,13 @@ from queue import Queue
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field, field_validator
 from starlette.responses import JSONResponse
 
-from agent.agentic_workflow import GraphBuilder
-from utils.save_to_document import save_document
 from utils.execution_tracer import ExecutionTracer
 from utils.prompt_injection_guard import contains_suspicious_prompt_patterns
 from utils.rate_limiter import InMemoryRateLimiter
+from utils.travel_agent_runner import run_travel_agent
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -90,38 +88,6 @@ class QueryRequest(BaseModel):
         if not normalized:
             raise ValueError("Question must not be empty.")
         return normalized
-
-
-def run_travel_agent(question: str, tracer: ExecutionTracer | None = None):
-    logger.info("Starting travel agent run question_length=%s", len(question))
-    if tracer:
-        tracer.log("status", "Preparing graph")
-    graph = GraphBuilder(model_provider="openai", tracer=tracer)
-    react_app = graph()
-
-    png_graph = react_app.get_graph().draw_mermaid_png()
-    with open("my_graph.png", "wb") as f:
-        f.write(png_graph)
-
-    if tracer:
-        tracer.log("status", "Graph compiled and diagram saved", graph_path=os.path.join(os.getcwd(), "my_graph.png"))
-
-    messages = {"messages": [HumanMessage(content=question)]}
-    if tracer:
-        tracer.log("status", "Invoking workflow", question=question)
-    output = react_app.invoke(messages)
-
-    if isinstance(output, dict) and "messages" in output:
-        final_output = output["messages"][-1].content
-    else:
-        final_output = str(output)
-
-    saved_file = save_document(final_output)
-    if tracer:
-        tracer.log("status", "Saved generated itinerary", saved_file=saved_file)
-    logger.info("Travel agent run completed saved_file=%s", bool(saved_file))
-
-    return {"answer": final_output, "saved_file": saved_file}
 
 @app.post("/query")
 async def query_travel_agent(query:QueryRequest, request: Request):

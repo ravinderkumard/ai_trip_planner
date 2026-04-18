@@ -12,6 +12,8 @@ The implementation combines three layers:
 - A LangGraph-based agent workflow that decides when to answer directly and when to call tools
 - A Streamlit frontend that lets a user submit a request and observe execution progress in real time
 
+The current implementation also includes a Redis-backed worker path so travel-planning requests can be processed asynchronously outside the request-response cycle.
+
 The current codebase is optimized for a single-user, local-development workflow. It favors simplicity and traceability over heavy abstraction.
 
 ### 2. Scope
@@ -41,6 +43,8 @@ At a high level, the application works as follows:
 
 The design intentionally keeps the backend stateless per request. Each incoming request builds and runs a fresh graph instance.
 
+In addition to the direct API path, the system can also consume Redis stream tasks, normalize them into travel queries, and process them through the same shared agent runner.
+
 ### 4. Design Goals
 
 The implementation suggests the following working goals:
@@ -50,6 +54,8 @@ The implementation suggests the following working goals:
 - Provide a complete answer in one response rather than a multi-step interview flow
 - Make execution observable through streamed trace events
 - Save generated travel plans as standalone Markdown files
+- Support both synchronous API execution and asynchronous worker-driven execution
+- Reuse the same execution engine across UI, API, and worker contexts
 
 There are also a few implicit design choices:
 
@@ -79,6 +85,8 @@ The API layer is responsible for:
 - Running the orchestration entry point
 - Returning either a final payload or a streamed event sequence
 - Handling top-level exceptions
+
+The API does not contain the travel-agent business logic directly anymore. That execution path is shared through a reusable runner utility so the worker can invoke the same flow.
 
 #### 5.2 Agent Orchestration Layer
 
@@ -132,6 +140,46 @@ Its role is intentionally narrow:
 
 The frontend does not run model logic locally. It acts as a client to the FastAPI service running on `http://localhost:8500`.
 
+The backend URL is now environment-configurable so the UI can run both locally and inside Docker-based deployments.
+
+#### 5.5 Worker Layer
+
+The asynchronous worker path is implemented through:
+
+- [`worker.py`](/Users/ravinderkumar/Work/upskill/AI/AIAgent/ai_trip_planner/worker.py)
+- [`run_worker.py`](/Users/ravinderkumar/Work/upskill/AI/AIAgent/ai_trip_planner/run_worker.py)
+- [`utils/redis_client.py`](/Users/ravinderkumar/Work/upskill/AI/AIAgent/ai_trip_planner/utils/redis_client.py)
+
+The worker reads tasks from the Redis stream `agent_tasks`, processes tasks for `travel_agent`, and writes results to `agent_results`.
+
+The worker currently expects each Redis stream entry to contain a field named `data`, where the value of `data` is a JSON string. The worker decodes that JSON, checks the `agent` field, and only processes tasks addressed to `travel_agent`.
+
+The current worker implementation uses `XREAD` with an in-memory `last_id` cursor that starts at `"0"`, which allows it to read existing stream entries already present in Redis when the worker starts.
+
+The worker accepts either:
+
+- a direct natural-language `query`
+- structured travel input such as `destination`, `duration_days`, and `budget_inr`
+
+Structured input is normalized into a user-style travel-planning query before the agent is invoked.
+
+A representative task payload is:
+
+```json
+{
+  "agent": "travel_agent",
+  "action": "create_trip_plan",
+  "task_id": "example-task-id",
+  "input": {
+    "destination": "Goa",
+    "duration_days": 3,
+    "budget_inr": 20000
+  }
+}
+```
+
+At the Redis stream level, that payload is published under the `data` field rather than as flat stream fields.
+
 ### 6. Request Lifecycle
 
 #### 6.1 User Input
@@ -157,6 +205,10 @@ That function:
 - Extracts the last model message from the returned state
 - Persists the response to a Markdown file in `output/`
 
+The same execution flow is also used by the Redis worker through the shared helper in [`utils/travel_agent_runner.py`](/Users/ravinderkumar/Work/upskill/AI/AIAgent/ai_trip_planner/utils/travel_agent_runner.py).
+
+That shared runner also contains the input-normalization logic used by the worker to turn structured travel-task payloads into the natural-language query expected by the agent workflow.
+
 #### 6.3 Streaming Execution
 
 For `/query/stream`, execution runs in a background thread. Progress is captured through `ExecutionTracer`, which emits timestamped events into a queue. A generator function consumes the queue and yields newline-delimited JSON events to the frontend.
@@ -172,8 +224,13 @@ The final backend payload currently contains:
 
 - `answer`
 - `saved_file`
+- `token_usage`
 
 The frontend then wraps the answer in presentation Markdown and renders it on screen.
+
+For worker-based execution, the result published back to Redis contains the same core answer plus task status metadata and, on success, the saved-file path and token usage totals.
+
+If a Redis task payload is malformed or cannot be decoded, the worker publishes a failed result rather than letting the worker loop terminate immediately.
 
 ### 7. Module Responsibilities
 
@@ -255,6 +312,14 @@ These classes are plain and easy to test in isolation.
 
 Security-related helpers also live in `utils/`, including the in-memory rate limiter and prompt-injection guard utilities used by the API and search tools.
 
+The `utils/` directory also now contains:
+
+- a shared runner used by both the API and worker
+- Redis connectivity helpers
+- query normalization logic for structured worker payloads
+
+The Redis helper automatically supports both local terminal execution and containerized execution. If `REDIS_HOST` is explicitly configured, that value is used. Otherwise it defaults to `localhost` for local runs and `host.docker.internal` when running inside Docker.
+
 ### 8. Agent Workflow Design
 
 The workflow uses a compact ReAct-style loop:
@@ -274,6 +339,13 @@ This design has a few advantages:
 - The same graph can support both synchronous and streamed execution
 
 The graph is not currently specialized by trip type, region, or user profile. All queries go through the same general-purpose planning loop.
+
+To support multiple entry points without duplicating orchestration code, the actual invocation flow has been moved into a shared runner utility. That shared runner is responsible for:
+
+- creating the graph
+- invoking the model
+- saving the generated document
+- returning token usage totals
 
 ### 9. Tooling Design
 
@@ -359,6 +431,8 @@ This design provides a useful audit trail for generated plans and keeps output p
 
 The current implementation also saves a visual representation of the graph to `my_graph.png` each time a request is executed. This is helpful during development, though it is not required for serving responses.
 
+When execution is initiated from the worker, the same saved-file behavior is preserved so asynchronous processing produces output artifacts identical to the direct API flow.
+
 ### 11. Execution Trace Design
 
 Tracing is handled by [`utils/execution_tracer.py`](/Users/ravinderkumar/Work/upskill/AI/AIAgent/ai_trip_planner/utils/execution_tracer.py).
@@ -378,6 +452,8 @@ It stores events locally and can optionally publish them to a queue. This makes 
 The tracer is deliberately lightweight. It is not a full observability framework, but it gives enough visibility to understand graph progress, model invocation, and tool execution during interactive use.
 
 The broader logging approach in the current codebase is intentionally selective. It logs request lifecycle events, model/provider initialization, output persistence, rate-limit rejections, and external-service failures, while avoiding full user prompt logging and avoiding secret values.
+
+The tracer also now accumulates token usage across the entire workflow. Because the LangGraph loop may invoke the model multiple times, the implementation records per-call token usage and exposes cumulative totals at the end of each run.
 
 ### 12. Configuration and Environment
 
@@ -404,6 +480,14 @@ The implementation expects the following keys to exist when relevant:
 - `OPENWEATHERMAP_API_KEY`
 - `EXCHANGE_RATE_API_KEY`
 - Tavily credentials through the environment expected by `langchain_tavily`
+- `CORS_ALLOWED_ORIGINS`
+- `RATE_LIMIT_MAX_REQUESTS`
+- `RATE_LIMIT_WINDOW_SECONDS`
+- `REDIS_HOST`
+- `REDIS_PORT`
+- `REDIS_DB`
+- `REDIS_PASSWORD` optional
+- `BACKEND_URL` for Streamlit deployments
 
 Environment values are loaded using `python-dotenv`.
 
@@ -482,6 +566,18 @@ The current implementation includes the following defensive controls:
 - Targeted warning and exception logging for abuse or upstream failures
 
 This is acceptable for development and demo usage, but it would need tightening before public deployment.
+
+### 17. Deployment Notes
+
+The repository now includes a Docker-based local deployment path:
+
+- [`Dockerfile`](/Users/ravinderkumar/Work/upskill/AI/AIAgent/ai_trip_planner/Dockerfile) builds a reusable application image
+- [`docker-compose.yml`](/Users/ravinderkumar/Work/upskill/AI/AIAgent/ai_trip_planner/docker-compose.yml) starts:
+  - the FastAPI API service
+  - the Streamlit UI service
+  - the Redis worker
+
+Redis is not currently managed inside `docker-compose.yml`. The compose stack expects Redis to be available externally, typically on the host machine or on another reachable Redis deployment. The compose file adds `host.docker.internal` host mapping so the containers can reach a host-based Redis service.
 
 ### 17. Extension Points
 

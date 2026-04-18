@@ -2,11 +2,12 @@ import streamlit as st
 import requests
 import datetime
 import json
+import os
 
 # from exception.exceptions import TradingBotException
 import sys
 
-BASE_URL = "http://localhost:8500"  # Backend endpoint
+BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8500")
 
 st.set_page_config(
     page_title="🌍 Travel Planner Agentic Application",
@@ -36,6 +37,7 @@ if submit_button and user_input.strip():
         trace_placeholder = st.empty()
         answer_placeholder = st.empty()
         save_placeholder = st.empty()
+        usage_placeholder = st.empty()
         trace_lines = []
         final_payload = None
 
@@ -73,6 +75,7 @@ if submit_button and user_input.strip():
         if final_payload:
             answer = final_payload.get("answer", "No answer returned.")
             saved_file = final_payload.get("saved_file")
+            token_usage = final_payload.get("token_usage", {})
             markdown_content = f"""# 🌍 AI Travel Plan
 
             # **Generated:** {datetime.datetime.now().strftime('%Y-%m-%d at %H:%M')} 
@@ -88,6 +91,13 @@ if submit_button and user_input.strip():
             answer_placeholder.markdown(markdown_content)
             if saved_file:
                 save_placeholder.success(f"Saved to: {saved_file}")
+            if token_usage:
+                usage_placeholder.info(
+                    "Token usage"
+                    f" | input: {token_usage.get('input_tokens', 0)}"
+                    f" | output: {token_usage.get('output_tokens', 0)}"
+                    f" | total: {token_usage.get('total_tokens', 0)}"
+                )
 
     except Exception as e:
         st.error(f"The response failed due to {e}")

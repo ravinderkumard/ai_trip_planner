@@ -1,0 +1,41 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uvicorn main:app --host 0.0.0.0 --port 8500
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8500:8500"
+    restart: unless-stopped
+
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: streamlit run streamlit_app.py --server.address 0.0.0.0 --server.port 8501
+    env_file:
+      - .env
+    environment:
+      BACKEND_URL: http://api:8500
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python run_worker.py
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
