@@ -579,7 +579,46 @@ The repository now includes a Docker-based local deployment path:
 
 Redis is not currently managed inside `docker-compose.yml`. The compose stack expects Redis to be available externally, typically on the host machine or on another reachable Redis deployment. The compose file adds `host.docker.internal` host mapping so the containers can reach a host-based Redis service.
 
-### 17. Extension Points
+### 18. Design Choices and Trade-offs
+
+This section records why certain infrastructure choices were made and what they cost, so future changes are made with the trade-offs in view rather than rediscovered later.
+
+#### 18.1 Redis Streams for the Worker Queue
+
+The worker path ([`worker.py`](/Users/ravinderkumar/Work/upskill/AI/AIAgent/ai_trip_planner/worker.py), [`utils/redis_client.py`](/Users/ravinderkumar/Work/upskill/AI/AIAgent/ai_trip_planner/utils/redis_client.py)) uses a Redis Stream (`agent_tasks` in, `agent_results` out) rather than a dedicated message broker or task-queue library.
+
+**Why this was a reasonable choice:**
+
+- Redis was already a dependency for the async execution path, so Streams add no new infrastructure to deploy or operate.
+- Streams are log-based and persist entries after they are read, which is why `XREAD` with a tracked offset was used instead of a plain list (`LPUSH`/`RPOP`) or pub/sub — both of those lose a message the instant it's delivered, with no replay.
+- Each entry gets an ordered, auto-generated ID, giving FIFO semantics and a natural cursor for free.
+- Redis Streams support consumer groups (`XGROUP` / `XREADGROUP` / `XACK` / `XPENDING` / `XCLAIM`) as a first-class feature, so the durability and competing-consumers guarantees this design is missing today are achievable without switching tools.
+- Operationally lightweight compared to running Kafka or RabbitMQ for what is currently a single-worker, low-throughput job queue.
+
+**What the current implementation gives up:**
+
+- `worker.py` reads with plain `XREAD` and tracks `last_id` as in-memory instance state, not `XREADGROUP` with acknowledgment. This means:
+  - A worker restart resets `last_id` to `"0"`, causing the entire un-trimmed stream history to be reprocessed — duplicate agent runs, duplicate LLM spend, duplicate `agent_results` entries.
+  - Running multiple worker replicas does not distribute load: every replica reads from `"0"` independently, so each one processes every task rather than the group splitting work.
+- There is no acknowledgment or dead-letter handling. A failure inside `process_task` before its own error handling engages leaves no record that a task was dropped.
+- Neither stream is trimmed (`XTRIM` / `MAXLEN`), so `agent_tasks` and `agent_results` grow unbounded on a long-running Redis instance.
+- Durability depends on how Redis itself is configured (AOF/RDB persistence). `docker-compose.yml` does not manage Redis at all — it expects an externally reachable instance — so persistence and high availability are outside this repository's control today.
+- There is currently no producer writing to `agent_tasks` anywhere in the codebase; the worker is a fully-built consumer with no wired-up caller yet.
+
+**Alternatives considered, and when they would be the better choice:**
+
+| Option | When it would be preferred over the current approach |
+|---|---|
+| Redis Streams + consumer groups (fix, not replace) | Lowest-effort correct version of what's already here — replace `XREAD`/local `last_id` with `XREADGROUP`/`XACK`, add `XTRIM MAXLEN ~ N`. Solves the duplication and unbounded-growth issues without adding infrastructure. |
+| RQ or Celery with a Redis broker | If retries, result backends, scheduling, and dead-letter queues are needed without hand-rolling them on top of raw Streams. |
+| RabbitMQ | If guaranteed delivery, complex routing, or per-message TTL/priority become requirements — more operational overhead but purpose-built for task-queue semantics. |
+| Kafka | If this evolves into high-throughput event streaming with multiple independent consumers needing to replay the same events (e.g. analytics, audit logging, and the worker all reading `agent_tasks` independently). Overkill at current scale. |
+| A managed cloud queue (SQS, GCP Pub/Sub, Azure Service Bus) | If deploying to a cloud provider and operational simplicity is preferred over self-managed infrastructure — built-in DLQ and visibility timeouts, no server to run. |
+| No queue at all (in-process background execution) | At the current single-instance scale, `/query/stream`'s background-thread approach already provides async execution without Redis. A queue only pays for itself once cross-process or cross-machine work distribution, or durability across restarts, is actually needed. |
+
+The practical near-term recommendation is the first row: keep Redis Streams, but adopt consumer groups so the primitive already in use is used correctly, rather than introducing a new broker to solve a problem that Streams already has a built-in answer for.
+
+### 19. Extension Points
 
 The current design leaves several clean extension points:
 
@@ -589,10 +628,11 @@ The current design leaves several clean extension points:
 - Replace local file persistence with object storage or a database
 - Add richer trace events without changing the API contract
 - Support itinerary refinement by carrying conversation state between requests
+- Adopt Redis consumer groups for the worker queue (see §18.1)
 
 Because the orchestration layer is isolated in `GraphBuilder`, most feature growth can happen without disturbing the API and frontend layers.
 
-### 18. Summary
+### 20. Summary
 
 The AI Trip Planner is designed as a small but coherent agent application. FastAPI handles transport, LangGraph handles reasoning and tool orchestration, utility services integrate with external data sources, and Streamlit provides an approachable interface for interactive use.
 
